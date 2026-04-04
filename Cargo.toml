@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/golo-bot",
+    "crates/golo-lib",
+]
+
+[workspace.dependencies]
+serenity = "0.12.5"
+tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
