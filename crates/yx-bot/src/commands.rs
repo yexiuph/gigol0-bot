@@ -1,18 +1,6 @@
-use golo_lib::database::{self, Db};
+use crate::dto::{Context, Error};
 use poise::serenity_prelude as serenity;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-#[derive(Debug)]
-pub struct Data {
-    pub db: Db,
-    pub http: reqwest::Client,
-    pub ai_api_key: String,
-    pub ai_base_url: String,
-    pub ai_model: String,
-    pub ai_max_tokens: u32,
-}
-type Error = Box<dyn std::error::Error + Send + Sync>;
-type Context<'a> = poise::Context<'a, Data, Error>;
 
 /// Show this help menu
 #[poise::command(slash_command, prefix_command)]
@@ -68,13 +56,13 @@ pub async fn userinfo(
 /// Check your balance
 #[poise::command(slash_command, prefix_command)]
 pub async fn balance(ctx: Context<'_>) -> Result<(), Error> {
-    let user = database::get_user(&ctx.data().db, ctx.author().id.into()).await?;
+    let user = yx_lib::db::get_user(&ctx.data().db, ctx.author().id.into()).await?;
 
     ctx.send(
         poise::CreateReply::default().embed(
             serenity::CreateEmbed::new()
                 .title(format!("{}'s Balance", ctx.author().name))
-                .field("💰 Balance", format!("{} coins", user.balance), true)
+                .field("💰 Balance", format!("{} coins", user.points), true)
                 .color(0xffd700),
         ),
     )
@@ -87,7 +75,7 @@ pub async fn balance(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, prefix_command)]
 pub async fn daily(ctx: Context<'_>) -> Result<(), Error> {
     let user_id = ctx.author().id.get();
-    let user = database::get_user(&ctx.data().db, user_id).await?;
+    let user = yx_lib::db::get_user(&ctx.data().db, user_id).await?;
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
@@ -124,7 +112,7 @@ pub async fn daily(ctx: Context<'_>) -> Result<(), Error> {
                 .color(0x00ff00)
                 .footer(serenity::CreateEmbedFooter::new(format!(
                     "New balance: {} coins",
-                    user.balance + reward
+                    user.points + reward
                 ))),
         ),
     )
@@ -142,7 +130,7 @@ pub async fn track(
     #[description = "Whether to repeat their message"] repeat: Option<bool>,
     #[description = "Whether to roast their message contextually"] roast: Option<bool>,
 ) -> Result<(), Error> {
-    database::track_user(
+    yx_lib::db::track_user(
         &ctx.data().db,
         user.id.get(),
         reply,
@@ -161,7 +149,7 @@ pub async fn untrack(
     ctx: Context<'_>,
     #[description = "The user to stop tracking"] user: serenity::User,
 ) -> Result<(), Error> {
-    database::untrack_user(&ctx.data().db, user.id.get()).await?;
+    yx_lib::db::untrack_user(&ctx.data().db, user.id.get()).await?;
     ctx.say(format!("❌ Stopped tracking **{}**.", user.name))
         .await?;
     Ok(())
@@ -196,5 +184,48 @@ pub async fn logs(
     }
 
     ctx.say(response).await?;
+    Ok(())
+}
+
+/// Create a premium quote image from a message
+#[poise::command(context_menu_command = "Quote Message", slash_command)]
+pub async fn quote(
+    ctx: Context<'_>,
+    #[description = "The message to quote"] msg: serenity::Message,
+) -> Result<(), Error> {
+    ctx.defer().await?;
+
+    let author = &msg.author;
+    let guild_id = msg.guild_id;
+
+    // Get nickname if in a guild
+    let display_name = if let Some(gid) = guild_id {
+        if let Ok(member) = gid.member(ctx, author.id).await {
+            member.display_name().to_string()
+        } else {
+            author.name.clone()
+        }
+    } else {
+        author.name.clone()
+    };
+
+    let avatar_url = author.face();
+    let content = msg.content_safe(ctx);
+
+    let image_bytes = crate::img_utils::generate_quote_image(
+        &ctx.data().http,
+        &avatar_url,
+        &display_name,
+        &author.name,
+        &content,
+    )
+    .await?;
+
+    ctx.send(
+        poise::CreateReply::default()
+            .attachment(serenity::CreateAttachment::bytes(image_bytes, "quote.png")),
+    )
+    .await?;
+
     Ok(())
 }

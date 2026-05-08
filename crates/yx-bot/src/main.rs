@@ -1,7 +1,9 @@
+pub mod dto;
 mod commands;
+mod img_utils;
 
-use commands::Data;
-use golo_lib::database;
+use dto::AppData;
+use yx_lib::db;
 use poise::serenity_prelude as serenity;
 use std::env;
 use tracing::{error, info};
@@ -20,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     // Initialize database
-    let db = database::setup_database().await?;
+    let db = db::setup_database().await?;
     info!("Database initialized and migrations applied.");
 
     // Setup poise framework
@@ -35,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 commands::track(),
                 commands::untrack(),
                 commands::logs(),
+                commands::quote(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some("!".into()),
@@ -58,10 +61,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         );
 
                         if let Ok(Some(tracking)) =
-                            database::get_tracked_user(&data.db, new_message.author.id.get()).await
+                            db::get_tracked_user(&data.db, new_message.author.id.get()).await
                         {
                             // Ensure user exists in users table (foreign key requirement)
-                            let _ = database::get_user(&data.db, new_message.author.id.get()).await;
+                            let _ = db::get_user(&data.db, new_message.author.id.get()).await;
                             info!(
                                 "Tracking active for user {}. repeat_message: {}, reply_text: {:?}",
                                 new_message.author.name,
@@ -69,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 tracking.reply_text
                             );
                             // Log the chat
-                            if let Err(e) = database::log_chat(
+                            if let Err(e) = db::log_chat(
                                 &data.db,
                                 new_message.author.id.get(),
                                 &new_message.content,
@@ -82,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             // Reply if needed
                             if tracking.roast_mode && !data.ai_api_key.is_empty() {
                                 let prompt = format!(
-                                    "You are a witty, sarcastic Filipino gamer who plays AQW and Mobile Legends. You speak Taglish and Bisaya. Roast this message from {}: \"{}\". Keep it short, savage, and use AQW/MLBB terminology and occasional Bisaya words for maximum effect.",
+                                    "You are a witty, sarcastic Filipino. You speak fluent English. Roast this message from {}: \"{}\". Keep it short, savage, and brutal.",
                                     new_message.author.name, new_message.content
                                 );
 
@@ -117,7 +120,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                     Err(e) => error!("Failed to call AI API: {:?}", e),
                                 }
                             } else if tracking.repeat_message {
-                                if let Err(e) = new_message.reply(ctx, &new_message.content).await {
+                                let sanitized_msg = &new_message.content.trim().to_string();
+                                if let Err(e) = new_message.reply(ctx, sanitized_msg).await {
                                     error!("Failed to repeat message: {:?}", e);
                                 }
                             } else if let Some(reply_text) = &tracking.reply_text {
@@ -148,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let ai_model = env::var("AI_MODEL").unwrap_or_else(|_| "llama-3.3-70b-versatile".to_string());
                 let ai_max_tokens = env::var("AI_MAX_TOKENS").unwrap_or_else(|_| "100".to_string()).parse().unwrap_or(100);
                 
-                Ok(Data { 
+                Ok(AppData { 
                     db, 
                     http: reqwest::Client::new(),
                     ai_api_key,
