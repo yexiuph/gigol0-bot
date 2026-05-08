@@ -140,11 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Box::pin(async move {
                 info!("Bot is ready as {}", _ready.user.name);
                 
-                // Register commands in the specific guild for instant updates
-                let guild_id = serenity::GuildId::new(1489934266711281804);
-                poise::builtins::register_in_guild(ctx, &framework.options().commands, guild_id).await?;
-                
-                // Still register globally for other servers (takes up to 1 hour)
+                // Register globally (takes up to 1 hour to update, but required for User App)
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 
                 let ai_api_key = env::var("AI_API_KEY").unwrap_or_default();

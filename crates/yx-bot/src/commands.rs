@@ -188,7 +188,12 @@ pub async fn logs(
 }
 
 /// Create a premium quote image from a message
-#[poise::command(context_menu_command = "Quote Message", slash_command)]
+#[poise::command(
+    context_menu_command = "Quote Message",
+    slash_command,
+    install_context = "Guild | User",
+    interaction_context = "Guild | BotDm | PrivateChannel"
+)]
 pub async fn quote(
     ctx: Context<'_>,
     #[description = "The message to quote"] msg: serenity::Message,
@@ -223,7 +228,12 @@ pub async fn quote(
             .unwrap_or_else(|| author.name.clone())
     };
 
-    let avatar_url = author.face();
+    let mut avatar_url = author.face();
+    if avatar_url.contains('?') {
+        avatar_url = format!("{}&size=4096", avatar_url);
+    } else {
+        avatar_url = format!("{}?size=4096", avatar_url);
+    }
     let content = msg.content_safe(ctx);
 
     let image_bytes = crate::img_utils::generate_quote_image(
@@ -236,11 +246,15 @@ pub async fn quote(
     .await?;
 
     let filename = format!(
-        "quote_{}.png",
+        "quote_{}{}.png",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs()
+            .as_nanos(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
     );
     ctx.send(
         poise::CreateReply::default()
