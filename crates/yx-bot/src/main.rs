@@ -29,14 +29,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: vec![
-                commands::help(),
-                commands::ping(),
-                commands::userinfo(),
-                commands::balance(),
-                commands::daily(),
-                commands::track(),
-                commands::untrack(),
-                commands::logs(),
                 commands::quote(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
@@ -148,6 +140,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let ai_model = env::var("AI_MODEL").unwrap_or_else(|_| "llama-3.3-70b-versatile".to_string());
                 let ai_max_tokens = env::var("AI_MAX_TOKENS").unwrap_or_else(|_| "100".to_string()).parse().unwrap_or(100);
                 
+                let emoji_cache = moka::future::Cache::builder()
+                    .max_capacity(1000)
+                    .time_to_idle(std::time::Duration::from_secs(60 * 60 * 24)) // 24h cache
+                    .build();
+
                 Ok(AppData { 
                     db, 
                     http: reqwest::Client::new(),
@@ -155,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     ai_base_url,
                     ai_model,
                     ai_max_tokens,
+                    emoji_cache,
                 })
             })
         })

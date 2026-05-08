@@ -200,6 +200,47 @@ pub async fn quote(
 ) -> Result<(), Error> {
     ctx.defer().await?;
 
+    // Filter for stickers, images, gifs, or embeds (including links)
+    let url_regex = regex::Regex::new(r"https?://[^\s]+").unwrap();
+    if !msg.attachments.is_empty()
+        || !msg.sticker_items.is_empty()
+        || !msg.embeds.is_empty()
+        || url_regex.is_match(&msg.content)
+    {
+        ctx.say("Mofo, I don't support stickers, images, gifs or embeds")
+            .await?;
+        return Ok(());
+    }
+
+    let mut content = msg.content.clone();
+
+    // Resolve user mentions manually to avoid stripping emoji IDs (which content_safe does)
+    let user_mention_regex = regex::Regex::new(r"<@!?(\d+)>").unwrap();
+    for cap in user_mention_regex.captures_iter(&msg.content) {
+        let id_str = &cap[1];
+        if let Ok(id) = id_str.parse::<u64>() {
+            let mention_user = msg.mentions.iter().find(|u| u.id == id);
+            let name = if let Some(u) = mention_user {
+                u.global_name.as_ref().unwrap_or(&u.name).clone()
+            } else {
+                "User".to_string()
+            };
+            content = content.replace(&cap[0], &format!("@{}", name));
+        }
+    }
+
+    // Role mentions
+    let role_mention_regex = regex::Regex::new(r"<@&(\d+)>").unwrap();
+    for cap in role_mention_regex.captures_iter(&msg.content) {
+        content = content.replace(&cap[0], "@Role");
+    }
+
+    // Channel mentions
+    let channel_mention_regex = regex::Regex::new(r"<#(\d+)>").unwrap();
+    for cap in channel_mention_regex.captures_iter(&msg.content) {
+        content = content.replace(&cap[0], "#Channel");
+    }
+
     let author = &msg.author;
     let guild_id = msg.guild_id;
 
@@ -209,12 +250,10 @@ pub async fn quote(
         if let Ok(member) = member_res {
             member.display_name().to_string()
         } else {
-            println!("Cache member fetch failed: {:?}", member_res.err());
             let http_member_res = ctx.http().get_member(gid, author.id).await;
             if let Ok(member) = http_member_res {
                 member.display_name().to_string()
             } else {
-                println!("HTTP member fetch failed: {:?}", http_member_res.err());
                 author
                     .global_name
                     .clone()
@@ -234,10 +273,10 @@ pub async fn quote(
     } else {
         avatar_url = format!("{}?size=4096", avatar_url);
     }
-    let content = msg.content_safe(ctx);
 
     let image_bytes = crate::img_utils::generate_quote_image(
         &ctx.data().http,
+        &ctx.data().emoji_cache,
         &avatar_url,
         &display_name,
         &author.name,
@@ -258,7 +297,10 @@ pub async fn quote(
     );
     ctx.send(
         poise::CreateReply::default()
-            .attachment(serenity::CreateAttachment::bytes(image_bytes, filename)),
+            .attachment(serenity::CreateAttachment::bytes(image_bytes, filename))
+            .components(vec![serenity::CreateActionRow::Buttons(vec![
+                serenity::CreateButton::new_link(msg.link()).label("Jump to Message"),
+            ])]),
     )
     .await?;
 

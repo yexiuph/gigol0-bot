@@ -32,3 +32,6 @@ yx-lib = { path = "../yx-lib" }
 image = "0.25.10"
 imageproc = "0.26.2"
 ab_glyph = "0.2.32"
+regex = "1.10"
+moka = { version = "0.12", features = ["future"] }
+futures = "0.3"
