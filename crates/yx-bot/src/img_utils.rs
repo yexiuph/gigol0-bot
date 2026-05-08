@@ -333,7 +333,9 @@ pub async fn generate_quote_image(
     let wm_y = (CANVAS_HEIGHT - WATERMARK_SIZE - 40 * SCALE) as i64;
     image::imageops::overlay(&mut img, &watermark, wm_x, wm_y);
 
-    let footer_text = "discord.gg/aqwcruel | © Cruel Quote System";
+    let footer_text_env = std::env::var("QUOTE_FOOTER")
+        .unwrap_or_else(|_| "discord.gg/aqwcruel | © Cruel Quote System".to_string());
+    let footer_text = &footer_text_env;
     let fw = text_width(footer_text, &font, footer_scale);
     draw_text_mut(
         &mut img,
