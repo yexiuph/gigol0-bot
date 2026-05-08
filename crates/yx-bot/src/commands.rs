@@ -200,13 +200,27 @@ pub async fn quote(
 
     // Get nickname if in a guild
     let display_name = if let Some(gid) = guild_id {
-        if let Ok(member) = gid.member(ctx, author.id).await {
+        let member_res = gid.member(ctx, author.id).await;
+        if let Ok(member) = member_res {
             member.display_name().to_string()
         } else {
-            author.name.clone()
+            println!("Cache member fetch failed: {:?}", member_res.err());
+            let http_member_res = ctx.http().get_member(gid, author.id).await;
+            if let Ok(member) = http_member_res {
+                member.display_name().to_string()
+            } else {
+                println!("HTTP member fetch failed: {:?}", http_member_res.err());
+                author
+                    .global_name
+                    .clone()
+                    .unwrap_or_else(|| author.name.clone())
+            }
         }
     } else {
-        author.name.clone()
+        author
+            .global_name
+            .clone()
+            .unwrap_or_else(|| author.name.clone())
     };
 
     let avatar_url = author.face();
@@ -221,9 +235,16 @@ pub async fn quote(
     )
     .await?;
 
+    let filename = format!(
+        "quote_{}.png",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
     ctx.send(
         poise::CreateReply::default()
-            .attachment(serenity::CreateAttachment::bytes(image_bytes, "quote.png")),
+            .attachment(serenity::CreateAttachment::bytes(image_bytes, filename)),
     )
     .await?;
 
