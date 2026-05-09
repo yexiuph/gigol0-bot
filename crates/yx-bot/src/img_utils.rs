@@ -362,17 +362,29 @@ pub async fn generate_quote_image(
         footer_text,
     );
 
-    // 5. Final Downsample (2x -> 1x)
+    // 5. Final Downsample (2x -> 1x) — CatmullRom is faster than Lanczos3 with minimal quality loss
     let final_img = image::imageops::resize(
         &img,
         TARGET_WIDTH,
         TARGET_HEIGHT,
-        image::imageops::FilterType::Lanczos3,
+        image::imageops::FilterType::CatmullRom,
     );
 
-    let mut bytes: Vec<u8> = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut bytes);
-    final_img.write_to(&mut cursor, image::ImageFormat::Png)?;
+    // Fast PNG encoding with minimal compression for speed
+    let mut bytes: Vec<u8> = Vec::with_capacity(500_000);
+    let cursor = std::io::Cursor::new(&mut bytes);
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        cursor,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Sub,
+    );
+    image::ImageEncoder::write_image(
+        encoder,
+        final_img.as_raw(),
+        TARGET_WIDTH,
+        TARGET_HEIGHT,
+        image::ExtendedColorType::Rgba8,
+    )?;
     Ok(bytes)
 }
 
