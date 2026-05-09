@@ -1,11 +1,13 @@
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
+use ab_glyph::{Font, PxScale, ScaleFont};
 use futures::future::join_all;
 use image::{Rgba, RgbaImage};
 use imageproc::drawing::draw_text_mut;
 use regex::Regex;
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::Path;
+use std::sync::Arc;
+
+use crate::dto::QuoteAssets;
 
 #[derive(Clone)]
 enum RichSegment {
@@ -31,11 +33,11 @@ const RIGHT_SECTION_START: u32 = 550 * SCALE;
 const RIGHT_SECTION_WIDTH: u32 = CANVAS_WIDTH - RIGHT_SECTION_START;
 const PADDING: u32 = 80 * SCALE;
 const WATERMARK_SIZE: u32 = 60 * SCALE;
-const ICON_SIZE: u32 = 28 * SCALE;
 
 pub async fn generate_quote_image(
     http: &reqwest::Client,
     cache: &moka::future::Cache<String, RgbaImage>,
+    assets: &Arc<QuoteAssets>,
     avatar_url: &str,
     nickname: &str,
     username: &str,
@@ -161,34 +163,9 @@ pub async fn generate_quote_image(
             }
         }
     }
-    let res_dir = if Path::new("crates/yx-bot/resources").exists() {
-        "crates/yx-bot/resources"
-    } else {
-        "resources"
-    };
-    let font_path = Path::new(res_dir).join("font.ttf");
-    let font_data = std::fs::read(font_path)?;
-    let font = FontVec::try_from_vec(font_data)?;
-
-    let logo_path = Path::new(res_dir).join("logo.png");
-    let logo_img = image::open(logo_path)?;
-    let mut watermark = logo_img
-        .resize(
-            WATERMARK_SIZE,
-            WATERMARK_SIZE,
-            image::imageops::FilterType::CatmullRom,
-        )
-        .to_rgba8();
-    for p in watermark.pixels_mut() {
-        p.0[3] = (p.0[3] as f32 * 0.4) as u8;
-    }
-    let icon = logo_img
-        .resize(
-            ICON_SIZE,
-            ICON_SIZE,
-            image::imageops::FilterType::CatmullRom,
-        )
-        .to_rgba8();
+    // Use pre-loaded assets (font, watermark, grain) for instant generation
+    let font = &assets.font;
+    let watermark = &assets.watermark;
 
     let mut avatar_gray =
         avatar_res.unwrap_or_else(|| RgbaImage::new(LEFT_IMAGE_WIDTH, CANVAS_HEIGHT));
@@ -211,29 +188,51 @@ pub async fn generate_quote_image(
     }
     image::imageops::overlay(&mut img, &avatar_gray, 0, 0);
 
-    // 2. Iterative Font Scaling
-    let mut content_size = 70.0 * SCALE as f32; // Start with a large cinematic size
-    let mut wrapped_content = Vec::new();
-    let mut final_line_height = 0.0;
-    let max_text_h = (CANVAS_HEIGHT as f32) * 0.75; // Use 75% of height for text
+    // 1b. Apply pre-generated film grain texture (single overlay, no per-pixel RNG)
+    image::imageops::overlay(&mut img, &assets.grain, 0, 0);
 
-    while content_size >= 25.0 * SCALE as f32 {
-        let test_scale = PxScale::from(content_size);
-        let test_line_height = content_size * 1.5;
+    // 2. Iterative Font Scaling
+    let mut content_size = 70.0 * SCALE as f32;
+    let mut wrapped_content;
+    let mut final_line_height;
+    let min_font_size = 12.0 * SCALE as f32;
+    let max_text_h = (CANVAS_HEIGHT as f32) * 0.75;
+    let available_width = (RIGHT_SECTION_WIDTH - PADDING * 2) as f32;
+
+    loop {
+        // Dynamic line height: tighter spacing for smaller font sizes
+        let line_height_factor = if content_size < 30.0 * SCALE as f32 {
+            1.3
+        } else {
+            1.5
+        };
+        let test_line_height = content_size * line_height_factor;
+
         wrapped_content = wrap_rich_text(
             &segments,
             &font,
-            test_scale,
-            (RIGHT_SECTION_WIDTH - PADDING * 2) as f32,
+            PxScale::from(content_size),
+            available_width,
         );
 
-        let total_h = (wrapped_content.len() as f32 * test_line_height) + (100.0 * SCALE as f32);
-        if total_h <= max_text_h {
-            final_line_height = test_line_height;
+        // Calculate author section height for this font size
+        let author_sf = if content_size < 20.0 * SCALE as f32 {
+            0.8
+        } else {
+            1.0
+        };
+        let author_h = (30.0 * SCALE as f32)
+            + (28.0 * SCALE as f32 * author_sf)
+            + (35.0 * SCALE as f32)
+            + (20.0 * SCALE as f32 * author_sf);
+
+        let total_h = (wrapped_content.len() as f32 * test_line_height) + author_h;
+        final_line_height = test_line_height;
+
+        if total_h <= max_text_h || content_size <= min_font_size {
             break;
         }
-        content_size -= 4.0;
-        final_line_height = test_line_height;
+        content_size -= 2.0;
     }
 
     let content_scale = PxScale::from(content_size);
@@ -247,9 +246,9 @@ pub async fn generate_quote_image(
         for segment in line {
             match segment {
                 RichSegment::Text(t) => scaled_line.push(RichSegment::Text(t)),
-                RichSegment::Emoji(img) => {
+                RichSegment::Emoji(eimg) => {
                     let scaled_emoji = image::imageops::resize(
-                        &img,
+                        &eimg,
                         final_emoji_size,
                         final_emoji_size,
                         image::imageops::FilterType::CatmullRom,
@@ -261,11 +260,24 @@ pub async fn generate_quote_image(
         scaled_wrapped.push(scaled_line);
     }
 
-    let total_text_height = (scaled_wrapped.len() as f32 * line_height) + (100.0 * SCALE as f32);
-    let mut current_y = (CANVAS_HEIGHT / 2) as f32 - (total_text_height / 2.0);
+    // Calculate precise author section dimensions for centering
+    let author_scale_factor = if content_size < 20.0 * SCALE as f32 {
+        0.8
+    } else {
+        1.0
+    };
+    let nick_font_size = 28.0 * SCALE as f32 * author_scale_factor;
+    let user_font_size = 20.0 * SCALE as f32 * author_scale_factor;
+    let gap_content_nick = 30.0 * SCALE as f32;
+    let gap_nick_user = 35.0 * SCALE as f32;
+    let author_section_h = gap_content_nick + nick_font_size + gap_nick_user + user_font_size;
 
-    for line in scaled_wrapped {
-        let w = rich_line_width(&line, &font, content_scale);
+    let text_block_h = scaled_wrapped.len() as f32 * line_height;
+    let total_block_height = text_block_h + author_section_h;
+    let mut current_y = (CANVAS_HEIGHT as f32 / 2.0) - (total_block_height / 2.0);
+
+    for line in &scaled_wrapped {
+        let w = rich_line_width(line, &font, content_scale);
         let mut current_x = RIGHT_SECTION_START + (RIGHT_SECTION_WIDTH / 2) - (w / 2.0) as u32;
 
         for segment in line {
@@ -278,15 +290,15 @@ pub async fn generate_quote_image(
                         current_y as i32,
                         content_scale,
                         &font,
-                        &t,
+                        t,
                     );
-                    current_x += text_width(&t, &font, content_scale) as u32;
+                    current_x += text_width(t, &font, content_scale) as u32;
                 }
                 RichSegment::Emoji(e) => {
                     let emoji_y = current_y + (line_height / 2.0)
                         - (final_emoji_size as f32 / 2.0)
                         - (5.0 * SCALE as f32);
-                    image::imageops::overlay(&mut img, &e, current_x as i64, emoji_y as i64);
+                    image::imageops::overlay(&mut img, e, current_x as i64, emoji_y as i64);
                     current_x += final_emoji_size + (4 * SCALE);
                 }
             }
@@ -294,14 +306,16 @@ pub async fn generate_quote_image(
         current_y += line_height;
     }
 
-    // 3. Draw Author Info
-    current_y += 40.0 * SCALE as f32;
-    let nick_scale = PxScale::from(28.0 * SCALE as f32);
-    let user_scale = PxScale::from(20.0 * SCALE as f32);
+    // 3. Draw Author Info (with dynamic scaling and truncation)
+    current_y += gap_content_nick;
+    let nick_scale = PxScale::from(nick_font_size);
+    let user_scale = PxScale::from(user_font_size);
     let footer_scale = PxScale::from(16.0 * SCALE as f32);
+    let max_author_width = available_width;
 
     let nick_text = format!("- {}", nickname);
-    let nw = text_width(&nick_text, &font, nick_scale);
+    let nick_display = truncate_to_width(&nick_text, &font, nick_scale, max_author_width);
+    let nw = text_width(&nick_display, &font, nick_scale);
     let nx = RIGHT_SECTION_START + (RIGHT_SECTION_WIDTH / 2) - (nw / 2.0) as u32;
     draw_text_mut(
         &mut img,
@@ -310,12 +324,13 @@ pub async fn generate_quote_image(
         current_y as i32,
         nick_scale,
         &font,
-        &nick_text,
+        &nick_display,
     );
 
-    current_y += 45.0 * SCALE as f32;
+    current_y += gap_nick_user;
     let user_text = format!("@{}", username);
-    let uw = text_width(&user_text, &font, user_scale);
+    let user_display = truncate_to_width(&user_text, &font, user_scale, max_author_width);
+    let uw = text_width(&user_display, &font, user_scale);
     let ux_start = RIGHT_SECTION_START + (RIGHT_SECTION_WIDTH / 2) - (uw / 2.0) as u32;
 
     draw_text_mut(
@@ -325,13 +340,13 @@ pub async fn generate_quote_image(
         current_y as i32,
         user_scale,
         &font,
-        &user_text,
+        &user_display,
     );
 
     // 4. Draw Footer & Corner Watermark
     let wm_x = (CANVAS_WIDTH - WATERMARK_SIZE - 40 * SCALE) as i64;
     let wm_y = (CANVAS_HEIGHT - WATERMARK_SIZE - 40 * SCALE) as i64;
-    image::imageops::overlay(&mut img, &watermark, wm_x, wm_y);
+    image::imageops::overlay(&mut img, watermark, wm_x, wm_y);
 
     let footer_text_env = std::env::var("QUOTE_FOOTER")
         .unwrap_or_else(|_| "discord.gg/aqwcruel | © Cruel Quote System".to_string());
@@ -398,11 +413,36 @@ fn wrap_rich_text<F: Font>(
                         if !current_line.is_empty() {
                             lines.push(current_line);
                             current_line = RichLine::new();
-                            current_width = 0.0;
                         }
                         let clean_word = word.to_string();
-                        current_line.push(RichSegment::Text(clean_word.clone()));
-                        current_width = text_width(&clean_word, font, scale);
+                        let clean_w = text_width(&clean_word, font, scale);
+
+                        // Character-level wrapping for ultra-long words
+                        if clean_w > max_width {
+                            let mut char_buf = String::new();
+                            for ch in clean_word.chars() {
+                                let next = format!("{}{}", char_buf, ch);
+                                if text_width(&next, font, scale) > max_width
+                                    && !char_buf.is_empty()
+                                {
+                                    current_line.push(RichSegment::Text(char_buf));
+                                    lines.push(current_line);
+                                    current_line = RichLine::new();
+                                    char_buf = ch.to_string();
+                                } else {
+                                    char_buf = next;
+                                }
+                            }
+                            if !char_buf.is_empty() {
+                                current_line.push(RichSegment::Text(char_buf.clone()));
+                                current_width = text_width(&char_buf, font, scale);
+                            } else {
+                                current_width = 0.0;
+                            }
+                        } else {
+                            current_line.push(RichSegment::Text(clean_word.clone()));
+                            current_width = text_width(&clean_word, font, scale);
+                        }
                     } else {
                         if let Some(RichSegment::Text(last_t)) = current_line.last_mut() {
                             last_t.push_str(&word_with_space);
@@ -446,4 +486,21 @@ fn text_width<F: Font>(text: &str, font: &F, scale: PxScale) -> f32 {
         last_glyph_id = Some(glyph.id);
     }
     width
+}
+
+fn truncate_to_width<F: Font>(text: &str, font: &F, scale: PxScale, max_width: f32) -> String {
+    if text_width(text, font, scale) <= max_width {
+        return text.to_string();
+    }
+    let ellipsis = "...";
+    let ellipsis_w = text_width(ellipsis, font, scale);
+    let mut truncated = String::new();
+    for ch in text.chars() {
+        truncated.push(ch);
+        if text_width(&truncated, font, scale) + ellipsis_w > max_width {
+            truncated.pop();
+            break;
+        }
+    }
+    format!("{}{}", truncated, ellipsis)
 }

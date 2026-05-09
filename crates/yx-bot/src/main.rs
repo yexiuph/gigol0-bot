@@ -145,6 +145,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .time_to_idle(std::time::Duration::from_secs(60 * 60 * 24)) // 24h cache
                     .build();
 
+                // Pre-load quote assets once at startup
+                let quote_assets = {
+                    let res_dir = if std::path::Path::new("crates/yx-bot/resources").exists() {
+                        "crates/yx-bot/resources"
+                    } else {
+                        "resources"
+                    };
+
+                    let font_data = std::fs::read(std::path::Path::new(res_dir).join("font.ttf"))?;
+                    let font = ab_glyph::FontVec::try_from_vec(font_data)
+                        .map_err(|e| format!("Font load error: {}", e))?;
+
+                    let logo_img = image::open(std::path::Path::new(res_dir).join("logo.png"))?;
+                    let wm_size = 60 * 2u32; // WATERMARK_SIZE
+                    let mut watermark = logo_img
+                        .resize(wm_size, wm_size, image::imageops::FilterType::CatmullRom)
+                        .to_rgba8();
+                    for p in watermark.pixels_mut() {
+                        p.0[3] = (p.0[3] as f32 * 0.4) as u8;
+                    }
+
+                    // Pre-generate grain texture
+                    use rand::Rng;
+                    let mut rng = rand::thread_rng();
+                    let (gw, gh) = (1200 * 2, 630 * 2);
+                    let mut grain = image::RgbaImage::new(gw, gh);
+                    for p in grain.pixels_mut() {
+                        let n = rng.gen_range(0u8..=25);
+                        *p = image::Rgba([n, n, n, 40]);
+                    }
+
+                    info!("Quote assets pre-loaded (font + watermark + grain texture).");
+                    std::sync::Arc::new(dto::QuoteAssets { font, watermark, grain })
+                };
+
                 Ok(AppData { 
                     db, 
                     http: reqwest::Client::new(),
@@ -153,6 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     ai_model,
                     ai_max_tokens,
                     emoji_cache,
+                    quote_assets,
                 })
             })
         })
