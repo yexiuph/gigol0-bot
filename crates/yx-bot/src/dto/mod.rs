@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 pub struct QuoteAssets {
     pub font: ab_glyph::FontVec,
+    pub fallbacks: Vec<ab_glyph::FontVec>,
     pub watermark: image::RgbaImage,
     pub grain: image::RgbaImage,
 }

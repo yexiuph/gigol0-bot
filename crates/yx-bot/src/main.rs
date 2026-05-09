@@ -157,6 +157,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     let font = ab_glyph::FontVec::try_from_vec(font_data)
                         .map_err(|e| format!("Font load error: {}", e))?;
 
+                    let mut fallbacks = Vec::new();
+                    let fallback_files = [
+                        "NotoSansCJKjp-Regular.otf",
+                        "NotoSansArabic-Regular.ttf",
+                        "NotoSansHebrew-Regular.ttf",
+                        "NotoSansDevanagari-Regular.ttf",
+                        "NotoSansTamil-Regular.ttf",
+                        "NotoSansEgyptianHieroglyphs-Regular.ttf",
+                        "NotoColorEmoji.ttf",
+                    ];
+                    for file in fallback_files {
+                        let path = std::path::Path::new(res_dir).join(file);
+                        if let Ok(data) = std::fs::read(&path) {
+                            if let Ok(f) = ab_glyph::FontVec::try_from_vec(data) {
+                                fallbacks.push(f);
+                            }
+                        }
+                    }
+
                     let logo_img = image::open(std::path::Path::new(res_dir).join("logo.png"))?;
                     let wm_size = 60 * 2u32; // WATERMARK_SIZE
                     let mut watermark = logo_img
@@ -177,7 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     }
 
                     info!("Quote assets pre-loaded (font + watermark + grain texture).");
-                    std::sync::Arc::new(dto::QuoteAssets { font, watermark, grain })
+                    std::sync::Arc::new(dto::QuoteAssets { font, fallbacks, watermark, grain })
                 };
 
                 Ok(AppData { 

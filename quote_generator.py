@@ -274,7 +274,7 @@ async def generate_quote_image(
         canvas.alpha_composite(logo, (wm_x, wm_y))
         
         footer_font = ImageFont.truetype(font_path, 16 * SCALE)
-        footer_text = os.getenv("QUOTE_FOOTER", "discord.gg/aqwcruel | © Cruel Quote System")
+        footer_text = os.getenv("QUOTE_FOOTER", "discord.gg/aqwcruel | © Cruel")
         fw = footer_font.getlength(footer_text)
         draw.text((wm_x - fw - 15*SCALE, wm_y + WATERMARK_SIZE/2 - 10*SCALE), footer_text, font=footer_font, fill=FOOTER_COLOR)
 

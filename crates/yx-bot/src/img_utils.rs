@@ -1,7 +1,8 @@
 use ab_glyph::{Font, PxScale, ScaleFont};
 use futures::future::join_all;
 use image::{Rgba, RgbaImage};
-use imageproc::drawing::draw_text_mut;
+
+use rand::Rng;
 use regex::Regex;
 use std::collections::HashMap;
 use std::error::Error;
@@ -134,7 +135,19 @@ pub async fn generate_quote_image(
                             CANVAS_HEIGHT,
                             image::imageops::FilterType::CatmullRom,
                         );
-                        let gray = scaled.grayscale().to_rgba8();
+                        let mut gray = scaled.grayscale().to_rgba8();
+
+                        // Apply iPhone-style noise filter to the avatar
+                        {
+                            let mut rng = rand::thread_rng();
+                            for p in gray.pixels_mut() {
+                                let noise: i16 = rng.gen_range(-25..=25);
+                                p.0[0] = (p.0[0] as i16 + noise).clamp(0, 255) as u8;
+                                p.0[1] = (p.0[1] as i16 + noise).clamp(0, 255) as u8;
+                                p.0[2] = (p.0[2] as i16 + noise).clamp(0, 255) as u8;
+                            }
+                        }
+
                         cache.insert(avatar_cache_key, gray.clone()).await;
                         return Some(gray);
                     }
@@ -164,7 +177,7 @@ pub async fn generate_quote_image(
         }
     }
     // Use pre-loaded assets (font, watermark, grain) for instant generation
-    let font = &assets.font;
+
     let watermark = &assets.watermark;
 
     let mut avatar_gray =
@@ -210,7 +223,7 @@ pub async fn generate_quote_image(
 
         wrapped_content = wrap_rich_text(
             &segments,
-            &font,
+            assets,
             PxScale::from(content_size),
             available_width,
         );
@@ -277,22 +290,22 @@ pub async fn generate_quote_image(
     let mut current_y = (CANVAS_HEIGHT as f32 / 2.0) - (total_block_height / 2.0);
 
     for line in &scaled_wrapped {
-        let w = rich_line_width(line, &font, content_scale);
+        let w = rich_line_width(line, assets, content_scale);
         let mut current_x = RIGHT_SECTION_START + (RIGHT_SECTION_WIDTH / 2) - (w / 2.0) as u32;
 
         for segment in line {
             match segment {
                 RichSegment::Text(t) => {
-                    draw_text_mut(
+                    draw_text_mut_with_fallback(
                         &mut img,
                         TEXT_COLOR,
                         current_x as i32,
                         current_y as i32,
                         content_scale,
-                        &font,
+                        assets,
                         t,
                     );
-                    current_x += text_width(t, &font, content_scale) as u32;
+                    current_x += text_width(t, assets, content_scale) as u32;
                 }
                 RichSegment::Emoji(e) => {
                     let emoji_y = current_y + (line_height / 2.0)
@@ -314,32 +327,32 @@ pub async fn generate_quote_image(
     let max_author_width = available_width;
 
     let nick_text = format!("- {}", nickname);
-    let nick_display = truncate_to_width(&nick_text, &font, nick_scale, max_author_width);
-    let nw = text_width(&nick_display, &font, nick_scale);
+    let nick_display = truncate_to_width(&nick_text, assets, nick_scale, max_author_width);
+    let nw = text_width(&nick_display, assets, nick_scale);
     let nx = RIGHT_SECTION_START + (RIGHT_SECTION_WIDTH / 2) - (nw / 2.0) as u32;
-    draw_text_mut(
+    draw_text_mut_with_fallback(
         &mut img,
         TEXT_COLOR,
         nx as i32,
         current_y as i32,
         nick_scale,
-        &font,
+        assets,
         &nick_display,
     );
 
     current_y += gap_nick_user;
     let user_text = format!("@{}", username);
-    let user_display = truncate_to_width(&user_text, &font, user_scale, max_author_width);
-    let uw = text_width(&user_display, &font, user_scale);
+    let user_display = truncate_to_width(&user_text, assets, user_scale, max_author_width);
+    let uw = text_width(&user_display, assets, user_scale);
     let ux_start = RIGHT_SECTION_START + (RIGHT_SECTION_WIDTH / 2) - (uw / 2.0) as u32;
 
-    draw_text_mut(
+    draw_text_mut_with_fallback(
         &mut img,
         DIM_TEXT_COLOR,
         ux_start as i32,
         current_y as i32,
         user_scale,
-        &font,
+        assets,
         &user_display,
     );
 
@@ -349,16 +362,16 @@ pub async fn generate_quote_image(
     image::imageops::overlay(&mut img, watermark, wm_x, wm_y);
 
     let footer_text_env = std::env::var("QUOTE_FOOTER")
-        .unwrap_or_else(|_| "discord.gg/aqwcruel | © Cruel Quote System".to_string());
+        .unwrap_or_else(|_| "discord.gg/aqwcruel | © Cruel".to_string());
     let footer_text = &footer_text_env;
-    let fw = text_width(footer_text, &font, footer_scale);
-    draw_text_mut(
+    let fw = text_width(footer_text, assets, footer_scale);
+    draw_text_mut_with_fallback(
         &mut img,
         FOOTER_COLOR,
         (wm_x - fw as i64 - 15 * SCALE as i64) as i32,
-        (wm_y + (WATERMARK_SIZE / 2) as i64 - 8 * SCALE as i64) as i32,
+        (wm_y + (WATERMARK_SIZE as i64 / 2) - 10 * SCALE as i64) as i32,
         footer_scale,
-        &font,
+        assets,
         footer_text,
     );
 
@@ -388,20 +401,20 @@ pub async fn generate_quote_image(
     Ok(bytes)
 }
 
-fn rich_line_width<F: Font>(line: &RichLine, font: &F, scale: PxScale) -> f32 {
+fn rich_line_width(line: &RichLine, assets: &QuoteAssets, scale: PxScale) -> f32 {
     let mut w = 0.0;
     for segment in line {
         match segment {
-            RichSegment::Text(t) => w += text_width(t, font, scale),
+            RichSegment::Text(t) => w += text_width(t, assets, scale),
             RichSegment::Emoji(e) => w += (e.width() as f32) + (4.0 * SCALE as f32),
         }
     }
     w
 }
 
-fn wrap_rich_text<F: Font>(
+fn wrap_rich_text(
     segments: &[RichSegment],
-    font: &F,
+    assets: &QuoteAssets,
     scale: PxScale,
     max_width: f32,
 ) -> Vec<RichLine> {
@@ -419,7 +432,7 @@ fn wrap_rich_text<F: Font>(
                     } else {
                         format!(" {}", word)
                     };
-                    let word_w = text_width(&word_with_space, font, scale);
+                    let word_w = text_width(&word_with_space, assets, scale);
 
                     if current_width + word_w > max_width {
                         if !current_line.is_empty() {
@@ -427,14 +440,14 @@ fn wrap_rich_text<F: Font>(
                             current_line = RichLine::new();
                         }
                         let clean_word = word.to_string();
-                        let clean_w = text_width(&clean_word, font, scale);
+                        let clean_w = text_width(&clean_word, assets, scale);
 
                         // Character-level wrapping for ultra-long words
                         if clean_w > max_width {
                             let mut char_buf = String::new();
                             for ch in clean_word.chars() {
                                 let next = format!("{}{}", char_buf, ch);
-                                if text_width(&next, font, scale) > max_width
+                                if text_width(&next, assets, scale) > max_width
                                     && !char_buf.is_empty()
                                 {
                                     current_line.push(RichSegment::Text(char_buf));
@@ -447,13 +460,13 @@ fn wrap_rich_text<F: Font>(
                             }
                             if !char_buf.is_empty() {
                                 current_line.push(RichSegment::Text(char_buf.clone()));
-                                current_width = text_width(&char_buf, font, scale);
+                                current_width = text_width(&char_buf, assets, scale);
                             } else {
                                 current_width = 0.0;
                             }
                         } else {
                             current_line.push(RichSegment::Text(clean_word.clone()));
-                            current_width = text_width(&clean_word, font, scale);
+                            current_width = text_width(&clean_word, assets, scale);
                         }
                     } else {
                         if let Some(RichSegment::Text(last_t)) = current_line.last_mut() {
@@ -485,34 +498,102 @@ fn wrap_rich_text<F: Font>(
     lines
 }
 
-fn text_width<F: Font>(text: &str, font: &F, scale: PxScale) -> f32 {
-    let scaled_font = font.as_scaled(scale);
+fn resolve_font<'a>(ch: char, assets: &'a QuoteAssets) -> &'a ab_glyph::FontVec {
+    if assets.font.glyph_id(ch).0 != 0 {
+        return &assets.font;
+    }
+    for fallback in &assets.fallbacks {
+        if fallback.glyph_id(ch).0 != 0 {
+            return fallback;
+        }
+    }
+    &assets.font // default to main font if unsupported (renders as a box)
+}
+
+fn text_width(text: &str, assets: &QuoteAssets, scale: PxScale) -> f32 {
     let mut width = 0.0;
     let mut last_glyph_id = None;
+    let mut last_font_ptr = std::ptr::null();
+
     for c in text.chars() {
+        let f = resolve_font(c, assets);
+        let scaled_font = f.as_scaled(scale);
         let glyph = scaled_font.scaled_glyph(c);
-        if let Some(last) = last_glyph_id {
-            width += scaled_font.kern(last, glyph.id);
+
+        let font_ptr = f as *const ab_glyph::FontVec;
+        if font_ptr == last_font_ptr {
+            if let Some(last) = last_glyph_id {
+                width += scaled_font.kern(last, glyph.id);
+            }
         }
+
         width += scaled_font.h_advance(glyph.id);
         last_glyph_id = Some(glyph.id);
+        last_font_ptr = font_ptr;
     }
     width
 }
 
-fn truncate_to_width<F: Font>(text: &str, font: &F, scale: PxScale, max_width: f32) -> String {
-    if text_width(text, font, scale) <= max_width {
+fn truncate_to_width(text: &str, assets: &QuoteAssets, scale: PxScale, max_width: f32) -> String {
+    if text_width(text, assets, scale) <= max_width {
         return text.to_string();
     }
     let ellipsis = "...";
-    let ellipsis_w = text_width(ellipsis, font, scale);
+    let ellipsis_w = text_width(ellipsis, assets, scale);
     let mut truncated = String::new();
     for ch in text.chars() {
         truncated.push(ch);
-        if text_width(&truncated, font, scale) + ellipsis_w > max_width {
+        if text_width(&truncated, assets, scale) + ellipsis_w > max_width {
             truncated.pop();
             break;
         }
     }
     format!("{}{}", truncated, ellipsis)
+}
+
+fn draw_text_mut_with_fallback(
+    image: &mut image::RgbaImage,
+    color: image::Rgba<u8>,
+    x: i32,
+    y: i32,
+    scale: PxScale,
+    assets: &QuoteAssets,
+    text: &str,
+) {
+    let mut current_x = x as f32;
+    let mut last_glyph_id = None;
+    let mut last_font_ptr = std::ptr::null();
+
+    for c in text.chars() {
+        let f = resolve_font(c, assets);
+        let scaled = f.as_scaled(scale);
+        let glyph_id = scaled.font().glyph_id(c);
+        let font_ptr = f as *const ab_glyph::FontVec;
+
+        if font_ptr == last_font_ptr {
+            if let Some(last) = last_glyph_id {
+                current_x += scaled.kern(last, glyph_id);
+            }
+        }
+
+        let glyph = glyph_id.with_scale_and_position(scale, ab_glyph::point(current_x, y as f32));
+        if let Some(outlined) = scaled.font().outline_glyph(glyph.clone()) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, gv| {
+                let px = gx + bounds.min.x as u32;
+                let py = gy + bounds.min.y as u32;
+                if px < image.width() && py < image.height() {
+                    let mut pixel = *image.get_pixel(px, py);
+                    use image::Pixel;
+                    let alpha = (color.0[3] as f32 * gv) as u8;
+                    pixel.blend(&image::Rgba([color.0[0], color.0[1], color.0[2], alpha]));
+                    image.put_pixel(px, py, pixel);
+                }
+            });
+        }
+
+        current_x += scaled.h_advance(glyph_id);
+        last_glyph_id = Some(glyph_id);
+        last_font_ptr = font_ptr;
+    }
 }
